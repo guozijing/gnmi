@@ -1,4 +1,4 @@
-module github.com/openconfig/gnmi
+module github.com/opennetworkinglab/gnmi
 
 go 1.12
 
