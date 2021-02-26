@@ -1,4 +1,4 @@
-module github.com/openconfig/gnmi
+module github.com/opennetworkinglab/gnmi
 
 go 1.12
 
@@ -9,6 +9,7 @@ require (
 	github.com/google/go-cmp v0.5.0
 	github.com/google/protobuf v3.11.4+incompatible // indirect
 	github.com/kylelemons/godebug v1.1.0
+	github.com/openconfig/gnmi v0.0.0
 	github.com/openconfig/goyang v0.0.0-20200115183954-d0a48929f0ea // indirect
 	github.com/openconfig/grpctunnel v0.0.0-20210225212728-02ace152db77
 	github.com/openconfig/ygot v0.6.0
@@ -18,3 +19,5 @@ require (
 	google.golang.org/grpc v1.34.0
 	google.golang.org/protobuf v1.25.0
 )
+
+replace github.com/openconfig/gnmi v0.0.0 => ./
