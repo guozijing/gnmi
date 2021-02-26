@@ -103,31 +103,13 @@ func (b *branch) removeQuery(query []string, client Client) (empty bool) {
 func (m *Match) Update(n interface{}, p []string) {
 	defer m.mu.RUnlock()
 	m.mu.RLock()
-	m.tree.update(n, p, nil)
+	m.tree.update(n, p)
 }
 
-// UpdateOnce invokes the callback of each client whose query matches the
-// supplied node and if the client hasn't been updated (in which case it
-// is not in the updated). If the callback of a client has been invoked in
-// this call, the client will be added to updated if updated is not nil.
-// Therefore, in order to track updated clients, updated must not be nil.
-func (m *Match) UpdateOnce(n interface{}, p []string, updated map[Client]struct{}) {
-	defer m.mu.RUnlock()
-	m.mu.RLock()
-	m.tree.update(n, p, updated)
-}
-
-func (b *branch) update(n interface{}, path []string, updated map[Client]struct{}) {
+func (b *branch) update(n interface{}, path []string) {
 	// Update all clients at this level.
 	for client := range b.clients {
-		if updated == nil {
-			client.Update(n)
-			continue
-		}
-		if _, ok := updated[client]; !ok {
-			client.Update(n)
-			updated[client] = struct{}{}
-		}
+		client.Update(n)
 	}
 	// Terminate recursion.
 	if len(b.children) == 0 {
@@ -136,7 +118,7 @@ func (b *branch) update(n interface{}, path []string, updated map[Client]struct{
 	// Implicit recursion for intermediate deletes.
 	if len(path) == 0 {
 		for _, c := range b.children {
-			c.update(n, nil, updated)
+			c.update(n, nil)
 		}
 		return
 	}
@@ -146,16 +128,16 @@ func (b *branch) update(n interface{}, path []string, updated map[Client]struct{
 	// so it will not satisfy this case.
 	if path[0] == Glob {
 		for _, c := range b.children {
-			c.update(n, path[1:], updated)
+			c.update(n, path[1:])
 		}
 	} else {
 		// Update all glob clients.
 		if sb, ok := b.children[Glob]; ok {
-			sb.update(n, path[1:], updated)
+			sb.update(n, path[1:])
 		}
 		// Update all explicit clients.
 		if sb, ok := b.children[path[0]]; ok {
-			sb.update(n, path[1:], updated)
+			sb.update(n, path[1:])
 		}
 	}
 }

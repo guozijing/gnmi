@@ -83,8 +83,6 @@ func TestErrorsRunCollector(t *testing.T) {
 	}}
 	for _, test := range tests {
 		t.Run(test.desc, func(t *testing.T) {
-			*port = 0
-			*tunnelRequest = ""
 			if test.config != "" {
 				*configFile = filepath.Join("testdata", test.config)
 				defer func() { *configFile = "" }()

@@ -19,7 +19,6 @@ package cli
 import (
 	"context"
 	"crypto/tls"
-	"math"
 	"regexp"
 	"sort"
 	"strings"
@@ -144,35 +143,9 @@ func TestSendQueryAndDisplay(t *testing.T) {
 		want: `dev1/a/b, 5
 `,
 	}, {
-		desc: "single target group output with comment prefix",
+		desc: "single target group output",
 		updates: []*fpb.Value{
-			{Path: []string{"a", "b"}, Value: &fpb.Value_DoubleValue{DoubleValue: &fpb.DoubleValue{Value: math.Inf(0)}}, Repeat: 1, Timestamp: &fpb.Timestamp{Timestamp: 100}},
-			{Value: &fpb.Value_Sync{Sync: 1}, Repeat: 1, Timestamp: &fpb.Timestamp{Timestamp: 300}},
-		},
-		query: client.Query{
-			Target:  "dev1",
-			Queries: []client.Path{{"a"}},
-			Type:    client.Once,
-			TLS:     &tls.Config{InsecureSkipVerify: true},
-		},
-		cfg: Config{
-			Display:       display,
-			DisplayPrefix: "# ",
-			DisplayIndent: "  ",
-			DisplayType:   "group",
-		},
-		want: `# {
-#   "dev1": {
-#     "a": {
-#       "b": +Inf
-#     }
-#   }
-# }
-`,
-	}, {
-		desc: "single target group output with list value",
-		updates: []*fpb.Value{
-			{Path: []string{"a", "b"}, Value: &fpb.Value_StringListValue{StringListValue: &fpb.StringListValue{Value: []string{"c", "d or e"}}}, Repeat: 1, Timestamp: &fpb.Timestamp{Timestamp: 100}},
+			{Path: []string{"a", "b"}, Value: &fpb.Value_IntValue{IntValue: &fpb.IntValue{Value: 5}}, Repeat: 1, Timestamp: &fpb.Timestamp{Timestamp: 100}},
 			{Value: &fpb.Value_Sync{Sync: 1}, Repeat: 1, Timestamp: &fpb.Timestamp{Timestamp: 300}},
 		},
 		query: client.Query{
@@ -190,7 +163,7 @@ func TestSendQueryAndDisplay(t *testing.T) {
 		want: `{
   "dev1": {
     "a": {
-      "b": ["c", "d or e"]
+      "b": 5
     }
   }
 }

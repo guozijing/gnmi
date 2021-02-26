@@ -135,9 +135,7 @@ func NewManager(cfg Config) (*Manager, error) {
 }
 
 func (m *Manager) handleGNMIUpdate(name string, resp *gpb.SubscribeResponse) error {
-	if log.V(2) {
-		log.Info(resp)
-	}
+	log.V(2).Info(resp)
 	if resp.Response == nil {
 		return fmt.Errorf("nil Response")
 	}
@@ -203,7 +201,6 @@ func (m *Manager) handleUpdates(name string, sc gpb.GNMI_SubscribeClient) error 
 				m.connect(name)
 			}
 			connected = true
-			log.Infof("Target %q successfully subscribed", name)
 		}
 		if err := m.handleGNMIUpdate(name, resp); err != nil {
 			log.Errorf("Error processing request %v for target %q: %v", resp, name, err)
@@ -234,6 +231,7 @@ func (m *Manager) subscribe(ctx context.Context, name string, conn *grpc.ClientC
 	if err := sc.Send(cr); err != nil {
 		return fmt.Errorf("error sending subscription request to target %q: %v", name, err)
 	}
+	log.Infof("Target %q successfully subscribed", name)
 	if err = m.handleUpdates(name, sc); err != nil {
 		return fmt.Errorf("stream failed for target %q: %v", name, err)
 	}

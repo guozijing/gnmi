@@ -30,7 +30,6 @@ import (
 	"github.com/golang/protobuf/proto"
 	"github.com/openconfig/gnmi/ctree"
 	"github.com/openconfig/gnmi/errlist"
-	"github.com/openconfig/gnmi/latency"
 	"github.com/openconfig/gnmi/metadata"
 	"github.com/openconfig/gnmi/path"
 	"github.com/openconfig/gnmi/value"
@@ -42,6 +41,14 @@ import (
 // int64 (nanoseconds since epoch).
 func T(n int64) time.Time { return time.Unix(0, n) }
 
+type latency struct {
+	mu        sync.Mutex
+	totalDiff time.Duration // cumulative difference in timestamps from device
+	count     int64         // number of updates in latency count
+	min       time.Duration // minimum latency
+	max       time.Duration // maximum latency
+}
+
 // A Target hosts an indexed cache of state for a single target.
 type Target struct {
 	name   string             // name of the target
@@ -49,38 +56,13 @@ type Target struct {
 	client func(*ctree.Leaf)  // Function to pass all cache updates to.
 	sync   bool               // denotes whether this cache is in sync with target
 	meta   *metadata.Metadata // metadata associated with target
-	lat    *latency.Latency   // latency measurements
+	lat    latency            // latency measurements
 	tsmu   sync.Mutex         // protects latest timestamp
 	ts     time.Time          // latest timestamp for an update
 }
 
-// options contains options for creating a Cache.
-type options struct {
-	// LatencyWindows is a list of time windows for which latency stats will be
-	// calculated and exported as metadata.
-	latencyWindows []time.Duration
-}
-
-// Option defines the function prototype to set options for creating a Cache.
-type Option func(*options)
-
-// WithLatencyWindows returns an Option to set latency windows for which
-// latency stats are calculated and exported for each target in Cache.
-// metaUpdatePeriod is the period for updating target metadata. The latency
-// windows need to be multiples of this period.
-func WithLatencyWindows(ws []string, metaUpdatePeriod time.Duration) (Option, error) {
-	windows, err := latency.ParseWindows(ws, metaUpdatePeriod)
-	if err != nil {
-		return nil, err
-	}
-	return func(o *options) {
-		o.latencyWindows = windows
-	}, nil
-}
-
 // Cache is a structure holding state information for multiple targets.
 type Cache struct {
-	opts    options
 	mu      sync.RWMutex
 	targets map[string]*Target // Map of per target caches.
 	client  func(*ctree.Leaf)  // Function to pass all cache updates to.
@@ -88,16 +70,11 @@ type Cache struct {
 
 // New creates a new instance of Cache that receives target updates from the
 // translator and provides an interface to service client queries.
-func New(targets []string, opts ...Option) *Cache {
+func New(targets []string) *Cache {
 	c := &Cache{
 		targets: make(map[string]*Target, len(targets)),
 		client:  func(*ctree.Leaf) {},
 	}
-	for _, opt := range opts {
-		opt(&c.opts)
-	}
-	latency.RegisterMetadata(c.opts.latencyWindows)
-
 	for _, t := range targets {
 		c.Add(t)
 	}
@@ -168,7 +145,6 @@ func (c *Cache) Query(target string, query []string, fn ctree.VisitFunc) error {
 	case target == "":
 		return errors.New("no target specified in query")
 	case target == "*":
-		defer c.mu.RUnlock()
 		c.mu.RLock()
 		// Run the query sequentially for each target cache.
 		for _, target := range c.targets {
@@ -176,6 +152,7 @@ func (c *Cache) Query(target string, query []string, fn ctree.VisitFunc) error {
 				return err
 			}
 		}
+		c.mu.RUnlock()
 	default:
 		dc := c.GetTarget(target)
 		if dc == nil {
@@ -190,7 +167,7 @@ func (c *Cache) Query(target string, query []string, fn ctree.VisitFunc) error {
 func (c *Cache) Add(target string) *Target {
 	defer c.mu.Unlock()
 	c.mu.Lock()
-	t := &Target{t: &ctree.Tree{}, name: target, meta: metadata.New(), client: c.client, lat: latency.New(c.opts.latencyWindows)}
+	t := &Target{t: &ctree.Tree{}, name: target, meta: metadata.New(), client: c.client}
 	c.targets[target] = t
 	return t
 }
@@ -270,15 +247,15 @@ func (c *Cache) GnmiUpdate(n *pb.Notification) error {
 // a separate gnmi.Notification.
 func (t *Target) GnmiUpdate(n *pb.Notification) error {
 	t.checkTimestamp(T(n.GetTimestamp()))
-	switch {
 	// Store atomic notifications as a single leaf in the tree.
-	case n.Atomic:
+	if n.Atomic {
 		if len(n.GetDelete()) > 0 {
 			return errors.New("atomic deletes unsupported")
 		}
 		l := len(n.GetUpdate())
 		if l == 0 {
-			t.meta.AddInt(metadata.EmptyCount, 1)
+			// This could be considered an error, but is silently allowed
+			// in the non-Atomic case, so treat equally.
 			return nil
 		}
 		nd, err := t.gnmiUpdate(n)
@@ -289,66 +266,42 @@ func (t *Target) GnmiUpdate(n *pb.Notification) error {
 			t.meta.AddInt(metadata.UpdateCount, int64(l))
 			t.client(nd)
 		}
-
-		// Break non-atomic complex notifications into individual leaves per update.
-	case len(n.GetUpdate())+len(n.GetDelete()) > 1:
-		updates := n.GetUpdate()
-		deletes := n.GetDelete()
-		n.Update, n.Delete = nil, nil
-		// restore back the notification updates and deletes
-		defer func() {
-			n.Update = updates
-			n.Delete = deletes
-		}()
-		errs := &errlist.List{}
-		for _, u := range updates {
-			noti := proto.Clone(n).(*pb.Notification)
-			noti.Update = []*pb.Update{u}
-			nd, err := t.gnmiUpdate(noti)
-			if err != nil {
-				errs.Add(err)
-				continue
-			}
-			if nd != nil {
-				t.meta.AddInt(metadata.UpdateCount, 1)
-				t.client(nd)
-			}
-		}
-
-		for _, d := range deletes {
-			noti := proto.Clone(n).(*pb.Notification)
-			noti.Delete = []*pb.Path{d}
-			t.meta.AddInt(metadata.UpdateCount, 1)
-			for _, nd := range t.gnmiRemove(noti) {
-				t.client(nd)
-			}
-		}
-		return errs.Err()
-
-	// Single update notification could be handled by the above code but is
-	// handled separately to avoid the unnecessary proto.Clone call.
-	case len(n.GetUpdate()) == 1:
-		nd, err := t.gnmiUpdate(n)
+		return nil
+	}
+	// Break non-atomic notifications with individual leaves per update.
+	updates := n.GetUpdate()
+	deletes := n.GetDelete()
+	n.Update, n.Delete = nil, nil
+	// restore back the notification updates and deletes
+	defer func() {
+		n.Update = updates
+		n.Delete = deletes
+	}()
+	errs := &errlist.List{}
+	for _, u := range updates {
+		noti := proto.Clone(n).(*pb.Notification)
+		noti.Update = []*pb.Update{u}
+		nd, err := t.gnmiUpdate(noti)
 		if err != nil {
-			return err
+			errs.Add(err)
+			continue
 		}
 		if nd != nil {
 			t.meta.AddInt(metadata.UpdateCount, 1)
 			t.client(nd)
 		}
+	}
 
-	// Single delete notification also avoids proto.Clone above.
-	case len(n.GetDelete()) == 1:
+	for _, d := range deletes {
+		noti := proto.Clone(n).(*pb.Notification)
+		noti.Delete = []*pb.Path{d}
 		t.meta.AddInt(metadata.UpdateCount, 1)
-		for _, nd := range t.gnmiRemove(n) {
+		for _, nd := range t.gnmiRemove(noti) {
 			t.client(nd)
 		}
-
-	// Empty notification.
-	default:
-		t.meta.AddInt(metadata.EmptyCount, 1)
 	}
-	return nil
+
+	return errs.Err()
 }
 
 func (t *Target) checkTimestamp(ts time.Time) {
@@ -370,7 +323,8 @@ func (t *Target) gnmiUpdate(n *pb.Notification) (*ctree.Leaf, error) {
 		suffix = nil
 	}
 	path := joinPrefixAndPath(n.Prefix, suffix)
-	if path[0] == metadata.Root {
+	switch {
+	case path[0] == metadata.Root:
 		realData = false
 		u := n.Update[0]
 		switch path[1] {
@@ -388,13 +342,10 @@ func (t *Target) gnmiUpdate(n *pb.Notification) (*ctree.Leaf, error) {
 				return nil, fmt.Errorf("%v : has value %v of type %T, expected boolean", metadata.Path(metadata.Connected), u.Val, u.Val)
 			}
 			t.meta.SetBool(metadata.Connected, tv.BoolVal)
-		case metadata.ConnectedAddr:
-			tv, ok := u.Val.Value.(*pb.TypedValue_StringVal)
-			if !ok {
-				return nil, fmt.Errorf("%v : has value %v of type %T, expected string", metadata.Path(metadata.ConnectedAddr), u.Val, u.Val)
-			}
-			t.meta.SetStr(metadata.ConnectedAddr, tv.StringVal)
 		}
+	case t.sync:
+		// Record latency for post-sync target updates.  Exclude metadata updates.
+		t.lat.compute(T(n.GetTimestamp()))
 	}
 	// Update an existing leaf.
 	if oldval := t.t.GetLeaf(path); oldval != nil {
@@ -415,11 +366,6 @@ func (t *Target) gnmiUpdate(n *pb.Notification) (*ctree.Leaf, error) {
 			t.meta.AddInt(metadata.SuppressedCount, 1)
 			return nil, nil
 		}
-		// Compute latency for updated leaves.
-		if t.sync && realData {
-			// Record latency for post-sync target updates.  Exclude metadata updates.
-			t.lat.Compute(T(n.GetTimestamp()))
-		}
 		return oldval, nil
 	}
 	// Add a new leaf.
@@ -429,11 +375,6 @@ func (t *Target) gnmiUpdate(n *pb.Notification) (*ctree.Leaf, error) {
 	if realData {
 		t.meta.AddInt(metadata.LeafCount, 1)
 		t.meta.AddInt(metadata.AddCount, 1)
-		// Compute latency for new leaves.
-		if t.sync {
-			// Record latency for post-sync target updates.  Exclude metadata updates.
-			t.lat.Compute(T(n.GetTimestamp()))
-		}
 	}
 	return t.t.GetLeaf(path), nil
 }
@@ -494,7 +435,7 @@ func (t *Target) updateMeta(clients func(*ctree.Leaf)) {
 	t.tsmu.Unlock()
 	t.meta.SetInt(metadata.LatestTimestamp, latest.UnixNano())
 
-	t.lat.UpdateReset(t.meta)
+	t.lat.updateReset(t.meta)
 	for value := range metadata.TargetBoolValues {
 		v, err := t.meta.GetBool(value)
 		if err != nil {
@@ -528,23 +469,6 @@ func (t *Target) updateMeta(clients func(*ctree.Leaf)) {
 			}
 		}
 	}
-
-	for value := range metadata.TargetStrValues {
-		v, err := t.meta.GetStr(value)
-		if err != nil {
-			continue
-		}
-		path := metadata.Path(value)
-		prev := t.t.GetLeafValue(path)
-		if prev == nil || prev.(*pb.Notification).Update[0].Val.Value.(*pb.TypedValue_StringVal).StringVal != v {
-			noti := metaNotiStr(t.name, value, v)
-			if n, _ := t.gnmiUpdate(noti); n != nil {
-				if clients != nil {
-					clients(n)
-				}
-			}
-		}
-	}
 }
 
 // Reset clears the Target of stale data upon a reconnection and notifies
@@ -560,6 +484,35 @@ func (t *Target) Reset() {
 		t.t.Delete([]string{root})
 		t.client(ctree.DetachedLeaf(deleteNoti(t.name, root, []string{"*"})))
 	}
+}
+
+func (l *latency) compute(ts time.Time) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	lat := time.Now().Sub(ts)
+	l.totalDiff += lat
+	l.count++
+	if lat > l.max {
+		l.max = lat
+	}
+	if lat < l.min || l.min == 0 {
+		l.min = lat
+	}
+}
+
+func (l *latency) updateReset(m *metadata.Metadata) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.count == 0 {
+		return
+	}
+	m.SetInt(metadata.LatencyAvg, (l.totalDiff / time.Duration(l.count)).Nanoseconds())
+	m.SetInt(metadata.LatencyMax, l.max.Nanoseconds())
+	m.SetInt(metadata.LatencyMin, l.min.Nanoseconds())
+	l.totalDiff = 0
+	l.count = 0
+	l.min = 0
+	l.max = 0
 }
 
 func joinPrefixAndPath(pr, ph *pb.Path) []string {
@@ -608,8 +561,4 @@ func metaNotiBool(t, m string, v bool) *pb.Notification {
 
 func metaNotiInt(t, m string, v int64) *pb.Notification {
 	return metaNoti(t, m, &pb.TypedValue{Value: &pb.TypedValue_IntVal{v}})
-}
-
-func metaNotiStr(t, m string, v string) *pb.Notification {
-	return metaNoti(t, m, &pb.TypedValue{Value: &pb.TypedValue_StringVal{v}})
 }

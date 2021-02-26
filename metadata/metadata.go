@@ -32,16 +32,10 @@ const (
 	Sync = "sync"
 	// Connected is a boolean that reports whether updates are being received.
 	Connected = "connected"
-	// ConnectedAddr is a string denoting the last-hop IP address of a connected
-	// target.
-	ConnectedAddr = "connectedAddress"
 	// AddCount is the total number of leaves that have been added.
 	AddCount = "targetLeavesAdded"
 	// DelCount is the total number of leaves that have been deleted.
 	DelCount = "targetLeavesDeleted"
-	// EmptyCount is the total number of notifications delivered that contain no
-	// updates or deletes.
-	EmptyCount = "targetLeavesEmpty"
 	// LeafCount is the current total leaves stored in the cache.
 	LeafCount = "targetLeaves"
 	// UpdateCount is the total number of leaf updates received.
@@ -69,23 +63,6 @@ const (
 	LatestTimestamp = "latestTimestamp"
 )
 
-// IntValue contains the path and other options for an int64 metadata.
-type IntValue struct {
-	Path     []string // Path of the int64 metadata
-	InitZero bool     // Whether to initiate to 0 (for counters starting from 0).
-}
-
-// RegisterIntValue registers an int64 type metadata whose path and options
-// are in val.
-func RegisterIntValue(name string, val *IntValue) {
-	TargetIntValues[name] = val
-}
-
-// UnregisterIntValue unregisters an int64 type metadata name.
-func UnregisterIntValue(name string) {
-	delete(TargetIntValues, name)
-}
-
 var (
 	// TargetBoolValues is the list of all bool metadata fields.
 	TargetBoolValues = map[string]bool{
@@ -94,24 +71,18 @@ var (
 	}
 
 	// TargetIntValues is the list of all int64 metadata fields.
-	TargetIntValues = map[string]*IntValue{
-		AddCount:        {[]string{Root, AddCount}, true},
-		DelCount:        {[]string{Root, DelCount}, true},
-		EmptyCount:      {[]string{Root, EmptyCount}, true},
-		LeafCount:       {[]string{Root, LeafCount}, true},
-		UpdateCount:     {[]string{Root, UpdateCount}, true},
-		StaleCount:      {[]string{Root, StaleCount}, true},
-		SuppressedCount: {[]string{Root, SuppressedCount}, true},
-		LatencyAvg:      {[]string{Root, LatencyAvg}, true},
-		LatencyMax:      {[]string{Root, LatencyMax}, true},
-		LatencyMin:      {[]string{Root, LatencyMin}, true},
-		Size:            {[]string{Root, Size}, true},
-		LatestTimestamp: {[]string{Root, LatestTimestamp}, true},
-	}
-
-	// TargetStrValues is the list of all string metadata fields.
-	TargetStrValues = map[string]bool{
-		ConnectedAddr: true,
+	TargetIntValues = map[string]bool{
+		AddCount:        true,
+		DelCount:        true,
+		LeafCount:       true,
+		UpdateCount:     true,
+		StaleCount:      true,
+		SuppressedCount: true,
+		LatencyAvg:      true,
+		LatencyMax:      true,
+		LatencyMin:      true,
+		Size:            true,
+		LatestTimestamp: true,
 	}
 )
 
@@ -120,31 +91,25 @@ type Metadata struct {
 	mu         sync.Mutex
 	valuesInt  map[string]int64
 	valuesBool map[string]bool
-	valuesStr  map[string]string
 }
 
 // Path is a convenience function that will return the full metadata path for
 // any valid metadata value.  Only metadata values registered above in
-// TargetBoolValues, TargetIntValues, and TargetStrValues will return a path.
-// An invalid metadata value will return nil.
+// TargetBoolValues and TargetIntValues will return a path.  An invalid metadata
+// value will return nil.
 func Path(value string) []string {
-	if TargetBoolValues[value] || TargetStrValues[value] {
+	if TargetBoolValues[value] || TargetIntValues[value] {
 		return []string{Root, value}
-	}
-	if val := TargetIntValues[value]; val != nil {
-		return val.Path
 	}
 	return nil
 }
 
 // New returns an initialized Metadata structure.  Integer values are
-// initialized to 0. Boolean values are initialized to false. String values are
-// initialized to empty string.
+// initialized to 0 and boolean values are initialized to false.
 func New() *Metadata {
 	m := Metadata{
 		valuesInt:  make(map[string]int64, len(TargetIntValues)),
 		valuesBool: make(map[string]bool, len(TargetBoolValues)),
-		valuesStr:  make(map[string]string, len(TargetStrValues)),
 	}
 	m.Clear()
 	return &m
@@ -155,7 +120,7 @@ func New() *Metadata {
 var ErrInvalidValue = errors.New("invalid metadata value")
 
 func validInt(value string) error {
-	if val := TargetIntValues[value]; val == nil {
+	if valid := TargetIntValues[value]; !valid {
 		return ErrInvalidValue
 	}
 	return nil
@@ -168,13 +133,6 @@ func validBool(value string) error {
 	return nil
 }
 
-func validStr(value string) error {
-	if valid := TargetStrValues[value]; !valid {
-		return ErrInvalidValue
-	}
-	return nil
-}
-
 // Clear sets all metadata values to zero values.
 func (m *Metadata) Clear() {
 	m.mu.Lock()
@@ -182,15 +140,8 @@ func (m *Metadata) Clear() {
 	for k := range TargetBoolValues {
 		m.valuesBool[k] = false
 	}
-	for k, val := range TargetIntValues {
-		if val.InitZero {
-			m.valuesInt[k] = 0
-		} else {
-			delete(m.valuesInt, k)
-		}
-	}
-	for k := range TargetStrValues {
-		m.valuesStr[k] = ""
+	for k := range TargetIntValues {
+		m.valuesInt[k] = 0
 	}
 }
 
@@ -255,31 +206,6 @@ func (m *Metadata) GetBool(value string) (bool, error) {
 	m.mu.Unlock()
 	if !ok {
 		return false, ErrUnsetValue
-	}
-	return v, nil
-}
-
-// SetStr atomically sets the metadata value specified to v.
-func (m *Metadata) SetStr(value, v string) error {
-	if err := validStr(value); err != nil {
-		return err
-	}
-	m.mu.Lock()
-	m.valuesStr[value] = v
-	m.mu.Unlock()
-	return nil
-}
-
-// GetStr atomically retrieves the metadata value specified.
-func (m *Metadata) GetStr(value string) (string, error) {
-	if err := validStr(value); err != nil {
-		return "", err
-	}
-	m.mu.Lock()
-	v, ok := m.valuesStr[value]
-	m.mu.Unlock()
-	if !ok {
-		return "", ErrUnsetValue
 	}
 	return v, nil
 }
